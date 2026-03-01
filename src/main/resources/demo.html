@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bostonbot • Demo</title>
+    <!-- Tailwind via CDN for quick styling, no build step -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Cute, rounded, clean font -->
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body class="min-h-screen bg-neutral-50 text-neutral-900">
+<div class="bg-hero" aria-hidden="true"></div>
+<main class="mx-auto max-w-2xl p-4 sm:p-6">
+    <header class="mb-4 flex items-center justify-between gap-3">
+        <div>
+            <div class="text-2xl sm:text-3xl font-extrabold tracking-widest uppercase bg-gradient-to-r from-fuchsia-600 via-orange-500 to-amber-500 bg-clip-text text-transparent drop-shadow">BOSTONBOT</div>
+            <p class="text-sm text-neutral-600 mt-1">Guide to becoming a Bostonian</p>
+        </div>
+    </header>
+
+    <!-- Chat window -->
+    <section id="chat" class="space-y-3 mb-28" aria-live="polite" aria-busy="false"></section>
+
+    <!-- Composer fixed to bottom (slight glass look) -->
+    <form id="composer" class="fixed inset-x-0 bottom-0 mx-auto max-w-2xl p-3 sm:p-4 bg-gradient-to-t from-white/85 to-white/60 backdrop-blur">
+        <div class="rounded-2xl border border-neutral-200 bg-white/95 shadow-sm">
+            <label for="message" class="sr-only">Your message</label>
+            <textarea id="message" rows="2" placeholder="Ask something…" class="w-full resize-none rounded-2xl bg-transparent p-3 outline-none" required></textarea>
+            <div class="flex items-center justify-between gap-3 border-t border-neutral-200 p-2">
+                <div class="text-[11px] text-neutral-500" id="status">Ready • Shift+Enter = newline, ⌘/Ctrl+Enter = send</div>
+                <div class="flex gap-2">
+                    <button id="clearBtn" type="button" class="px-3 py-1.5 rounded-xl text-sm border border-neutral-200 hover:bg-neutral-100">Clear</button>
+                    <button id="sendBtn" type="submit" class="px-4 py-1.5 rounded-xl text-white bg-gradient-to-r from-sky-600 to-indigo-600 hover:opacity-90 disabled:opacity-50">Send</button>
+                </div>
+            </div>
+        </div>
+    </form>
+</main>
+
+<script>
+    // --- CONFIG ---
+    const API_BASE = '';
+    const CHAT_ENDPOINT = '/api/chat';
+    const STREAM_ENDPOINT = '/api/chat/stream/'; // optional SSE
+
+    // --- STATE ---
+    const HISTORY_KEY = 'chatHistory';
+    let sessionId = localStorage.getItem('sessionId') || crypto.randomUUID();
+    localStorage.setItem('sessionId', sessionId);
+
+    const chatEl = document.getElementById('chat');
+    const form = document.getElementById('composer');
+    const messageEl = document.getElementById('message');
+    const sendBtn = document.getElementById('sendBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const statusEl = document.getElementById('status');
+
+    // --- HISTORY ---
+    function saveHistory(entry){
+      const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+      list.push(entry);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(-100)));
+    }
+    function loadHistory(){
+      const list = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+      list.forEach(e => addBubble(e.role, e.text, { time: e.time, sources: e.sources }));
+    }
+
+    // --- UI HELPERS ---
+    function addBubble(role, text, extras = {}){
+      const wrap = document.createElement('div');
+      wrap.className = role === 'user' ? 'flex justify-end' : 'flex justify-start';
+
+      const container = document.createElement('div');
+      container.className = 'max-w-[85%]';
+
+      const bubble = document.createElement('div');
+      const userClasses = 'bg-gradient-to-r from-sky-600 to-indigo-600 text-white';
+      const assistantClasses = 'bg-white border border-neutral-200';
+      bubble.className = `bubble-enter whitespace-pre-wrap rounded-2xl px-4 py-2 text-sm shadow ${role === 'user' ? userClasses : assistantClasses}`;
+      bubble.textContent = text;
+      container.appendChild(bubble);
+
+      // Meta row (time + sources chips)
+      const meta = document.createElement('div');
+      meta.className = 'mt-1 flex flex-wrap items-center gap-2';
+      const time = document.createElement('span');
+      time.className = 'text-[11px] text-neutral-500';
+      time.textContent = extras.time ? new Date(extras.time).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      meta.appendChild(time);
+
+      if (extras.sources && Array.isArray(extras.sources) && extras.sources.length){
+        extras.sources.forEach(s => {
+          const a = document.createElement('a');
+          a.className = 'text-[11px] px-2 py-0.5 rounded-full border text-sky-700 border-sky-200 hover:bg-sky-50';
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.href = s.url || '#';
+          a.textContent = s.title || s.url || s.id || 'source';
+          meta.appendChild(a);
+        });
+      }
+      container.appendChild(meta);
+
+      wrap.appendChild(container);
+      chatEl.appendChild(wrap);
+      chatEl.scrollTo({ top: chatEl.scrollHeight, behavior: 'smooth' });
+      return bubble;
+    }
+
+    function setBusy(b){
+      form.setAttribute('aria-busy', String(b));
+      statusEl.textContent = b ? 'Thinking…' : 'Ready • Shift+Enter = newline, ⌘/Ctrl+Enter = send';
+      sendBtn.disabled = b;
+    }
+
+    function typingBubble(){
+      const el = addBubble('assistant', '');
+      el.innerHTML = '<span class="inline-flex items-center gap-1">Thinking<span class="inline-flex gap-1 ml-1 align-middle">'+
+        '<span class="inline-block w-1.5 h-1.5 rounded-full bg-current" style="animation:pulseDot 1s infinite"></span>'+
+        '<span class="inline-block w-1.5 h-1.5 rounded-full bg-current" style="animation:pulseDot 1s .2s infinite"></span>'+
+        '<span class="inline-block w-1.5 h-1.5 rounded-full bg-current" style="animation:pulseDot 1s .4s infinite"></span>'+
+      '</span></span>';
+      return el;
+    }
+
+    // --- LOAD PREVIOUS + GREETING ---
+    loadHistory();
+    if (!localStorage.getItem('greeted')){
+      addBubble('assistant', 'Hey! Ask me anything about Boston—neighborhoods, transit, events, or food.');
+      localStorage.setItem('greeted','1');
+    }
+
+    // --- EVENTS ---
+    clearBtn.addEventListener('click', () => {
+      chatEl.innerHTML = '';
+      localStorage.removeItem(HISTORY_KEY);
+      statusEl.textContent = 'Cleared';
+      setTimeout(() => statusEl.textContent = 'Ready • Shift+Enter = newline, ⌘/Ctrl+Enter = send', 700);
+    });
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = messageEl.value.trim();
+      if (!text) return;
+
+      addBubble('user', text);
+      saveHistory({ role:'user', text, time: Date.now() });
+      messageEl.value = '';
+      const typing = typingBubble();
+
+      try {
+        setBusy(true);
+        const res = await fetch(API_BASE + CHAT_ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text, sessionId })
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (data.sessionId) sessionId = data.sessionId;
+
+        // If server supports streaming via SSE, prefer it
+        if (data.streamId){
+          typing.textContent = '';
+          let answer = '';
+          const es = new EventSource(API_BASE + STREAM_ENDPOINT + encodeURIComponent(data.streamId));
+          es.onmessage = (evt) => {
+            try {
+              const msg = JSON.parse(evt.data);
+              if (msg.delta) { answer += msg.delta; typing.textContent = answer; }
+              if (msg.done) {
+                es.close();
+                if (msg.sources) { attachSources(typing, msg.sources); }
+                saveHistory({ role:'assistant', text: answer, time: Date.now(), sources: msg.sources });
+                setBusy(false);
+              }
+            } catch {}
+          };
+          es.onerror = () => { es.close(); setBusy(false); };
+        } else {
+          // Non-streaming fallback
+          typing.textContent = data.answer || '[No answer]';
+          if (data.sources && data.sources.length) attachSources(typing, data.sources);
+          saveHistory({ role:'assistant', text: typing.textContent, time: Date.now(), sources: data.sources });
+        }
+      } catch (err) {
+        typing.textContent = '⚠️ Error: ' + (err.message || 'Request failed');
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    function attachSources(bubbleEl, sources){
+      const meta = document.createElement('div');
+      meta.className = 'mt-1 flex flex-wrap items-center gap-2';
+      const label = document.createElement('span');
+      label.className = 'text-[11px] text-neutral-500';
+      label.textContent = 'Sources:';
+      meta.appendChild(label);
+      sources.forEach(s => {
+        const a = document.createElement('a');
+        a.className = 'text-[11px] px-2 py-0.5 rounded-full border text-sky-700 border-sky-200 hover:bg-sky-50';
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.href = s.url || '#';
+        a.textContent = s.title || s.url || s.id || 'source';
+        meta.appendChild(a);
+      });
+      bubbleEl.parentElement.appendChild(meta);
+    }
+
+    // Submit with Cmd/Ctrl+Enter, new line with Shift+Enter
+    messageEl.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); form.requestSubmit(); }
+    });
+</script>
+</body>
+
+</html>
